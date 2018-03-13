@@ -3,6 +3,7 @@ const Promise = require('bluebird');
 const config = {};
 let redisClient;
 let mongoClient;
+let mongoDb;
 
 exports.handler = handleIt;
 
@@ -10,18 +11,13 @@ exports.handler = handleIt;
  * Lambda endpoint handler
  */
 function handleIt(event, context, callback) {
-	const headers = event.headers;
-	const requestBody = JSON.parse(event.body);
 	console.log("EVENT", event);
-	console.log("REQUEST-HEADERS", headers);
-	console.log("REQUEST_BODY", requestBody);
-	console.log("REQUEST_RESOURCE_DATA", requestBody.resourceData);
 
 	const response = {
 		statusCode: 200,
-		headers: {
+		/*headers: {
 			'Content-Type': 'text/plain'
-		},
+		},*/
 		isBase64Encoded: false
 	};
 	let responseBody;
@@ -29,23 +25,31 @@ function handleIt(event, context, callback) {
 	// handle subscription validation
 	if (event.queryStringParameters && Object.keys(event.queryStringParameters).indexOf('validationtoken') > -1) {
 		responseBody = event.queryStringParameters[Object.keys(event.queryStringParameters)[0]];
+		response.body = responseBody;
 		callback(null, response);
 	}
 	// notifications
 	else {
-		initialize(false)
-			.then(() => {
-				/*redisClient.hgetallAsync("user:0051a000000aX5PAAU")
-					.then(user => {
-						responseBody.user = user;
-						responseBody = JSON.stringify(responseBody);
-						response.body = responseBody;
-						cleanUp();
+		const headers = event.headers;
+		const requestBody = JSON.parse(event.body);
+		console.log("REQUEST-HEADERS", headers);
+		console.log("REQUEST_BODY", requestBody);
+		console.log("REQUEST_RESOURCE_DATA", requestBody.resourceData);
 
+		initialize()
+			.then(() => {
+				console.log('Lambda initialized');
+				return redisClient.hgetallAsync("user:0051a000000aX5PAAU")
+					.then(user => {
+						responseBody = {
+							user: user.user_id
+						};
+						response.body = JSON.stringify(responseBody);
+
+						cleanUp();
 						callback(null, response);
 					})
 				;
-				callback(null, response);*/
 			})
 			.catch(err => {
 				cleanUp();
@@ -64,7 +68,7 @@ function initialize(useMongo) {
 		.then(() => {
 			return Promise.all([
 				setRedisClient(),
-				useMongo ? getMongoClient() : Promise.resolve()
+				getMongoClient()
 			]);
 		})
 	;
@@ -75,6 +79,7 @@ function initialize(useMongo) {
  */
 function cleanUp() {
 	if (redisClient) redisClient.quit();
+	if (mongoClient) mongoClient.close();
 }
 
 /**
@@ -94,7 +99,8 @@ function getMongoClient() {
 			}
 
 			console.log('Mongo client connected');
-			mongoClient = client.db(config.mongoDb);
+			mongoClient = client;
+			mongoDB = client.db(config.mongoDb);
 			return resolve(mongoClient);
 		});
 	});
