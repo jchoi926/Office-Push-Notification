@@ -1,0 +1,16 @@
+{
+  "name": "office-push-notifications",
+  "version": "1.0.0",
+  "description": "Office push notification lambda package",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bluebird": "^3.5.1",
+    "mongodb": "^3.0.4",
+    "redis": "^2.8.0"
+  }
+}
