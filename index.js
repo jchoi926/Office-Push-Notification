@@ -1,7 +1,9 @@
 const AWS = require('aws-sdk');
 const Promise = require('bluebird');
 const md5 = require('md5');
-const config = {};
+
+let env;
+let config = {};
 let redisClient;
 let mongoClient;
 let mongoDB;
@@ -13,6 +15,7 @@ exports.handler = handleIt;
  */
 function handleIt(event, context, callback) {
 	console.log("EVENT", event);
+	env = event.requestContext.stage;
 	const parameters = event.queryStringParameters ? Object.keys(event.queryStringParameters) : [];
 	const validationTokenParam = 'validationtoken';
 
@@ -26,7 +29,7 @@ function handleIt(event, context, callback) {
 	let responseBody;
 
 	// handle subscription validation
-	if (parameters.indexOf(validationTokenParam) >= 0) {	// If Validation Token param exists
+	if (parameters.indexOf(validationTokenParam) > -1) {
 		console.log("SUBSCRIPTION VALIDATION ---");
 		responseBody = event.queryStringParameters[validationTokenParam];
 		response.body = responseBody;
@@ -64,9 +67,7 @@ function handleIt(event, context, callback) {
 						const subscriptionId = resourceData.SubscriptionId;
 						const subscriptionIdHash = md5(subscriptionId);
 						console.log('FETCH USER ID FROM EMAIL SUBSCRIPTION', subscriptionIdHash);
-						//DB_CACHE = 6
-						//dbMasterEmailSubscription	master_email_subscription:{platform}:{userId} has sorted keys MD5 generateIdHash(subscriptionId)
-						//dbEmailSubscription	email_subscription:{platform}:{subscriptionIdHash}
+
 						redisClient.hgetallAsync(`email_subscription:${subscriptionIdHash}`)
 							.then(emailSubscription => {
 								console.log('EMAIL-SUBSCRIPTION', emailSubscription);
@@ -80,9 +81,6 @@ function handleIt(event, context, callback) {
 				} else // Like Change Type = Missed
 					console.log("!!! RESOURCE DATA MISSING !!!");
 
-				responseBody = {
-					'Content-Type': 'text/plain'
-				};
 				response.body = JSON.stringify(responseBody);
 
 				cleanUp();
@@ -100,7 +98,7 @@ function handleIt(event, context, callback) {
  * Bootstrap Lambda
  * @return {Promise}
  */
-function initialize(useMongo) {
+function initialize() {
 	return getConfigParams()
 		.then(() => {
 			return Promise.all([
@@ -137,7 +135,7 @@ function getMongoClient() {
 
 			console.log('Mongo client connected');
 			mongoClient = client;
-			mongoDB = client.db(config.mongoDb);
+			mongoDB = client.db(config.mongo.db);
 			return resolve(mongoClient);
 		});
 	});
@@ -148,7 +146,7 @@ function getMongoClient() {
  * @return {string}
  */
 function getMongoConnectionString() {
-	return `mongodb://${encodeURIComponent(config.mongoUser)}:${encodeURIComponent(config.mongoPass)}@${config.mongoHost}/${config.mongoDb}?${config.mongoConnectOptions}&replicaSet=${config.mongoReplicaSet}&ssl=true&${config.mongoAuthOptions}`;
+	return `mongodb://${encodeURIComponent(config.mongo.user)}:${encodeURIComponent(config.mongo.pass)}@${config.mongo.host}/${config.mongo.db}?${config.mongo.connectOptions}&replicaSet=${config.mongo.replicaSet}&ssl=true&${config.mongo.authOptions}`;
 }
 
 /**
@@ -162,7 +160,7 @@ function setRedisClient() {
 	return new Promise((resolve, reject) => {
 		const redis = require('redis');
 		Promise.promisifyAll(redis.RedisClient.prototype);
-		redisClient = redis.createClient({host: config.redisHost, port: parseInt(config.redisPort), password: config.redisPass});
+		redisClient = redis.createClient({host: config.redis.host, port: parseInt(config.redis.port), password: config.redis.pass});
 
 		redisClient.on('connect', () => {
 			console.log('Redis client connected');
@@ -183,38 +181,41 @@ function getConfigParams() {
 	if (Object.keys(config).length > 0)
 		return Promise.resolve(config);
 
-	/*const S3 = new AWS.S3({region: 'us-east-1'});
-	S3.getObject({Bucket: 'ci-office-notification', Key: 'test.yml'}, function (err, data) {
-		console.log("S3####", err, data, data.Body.toString());
-	});*/
 	const S3 = Promise.promisifyAll(new AWS.S3({region: 'us-east-1'}));
-	S3.getObjectAsync({Bucket: 'ci-office-notification', Key: 'test.json'})
-		.then(config => {
-			console.log("CONFIG", config.Body.toString());
+	return S3.getObjectAsync({Bucket: 'ci-office-notification', Key: `${env}.json`})
+		.then(s3Obj => {
+			config = JSON.parse(s3Obj.Body.toString());
+			return config;
 		})
 	;
-	const SSM = Promise.promisifyAll(new AWS.SSM());
-	return SSM.getParametersAsync({
-		Names: [
-			'redisHost',
-			'redisPort',
-			'redisPass',
-			'mongoHost',
-			'mongoUser',
-			'mongoPass',
-			'mongoDb',
-			'mongoReplicaSet',
-			'mongoConnectOptions',
-			'mongoAuthOptions'
-		],
-		WithDecryption: true
-	})
-	.then(params => {
-		params.Parameters.forEach(param => {
-			config[param.Name] = param.Value;
-		});
-		return config;
+}
+
+/**
+ * Cycle through User's Drafts and process if target draft exist
+ * @param {String} userId
+ * @param {Object} resourceData
+ */
+function processDrafts(userId, resourceData) {
+	let resourceObject = {};
+	Object.keys(resourceData).forEach(propName => {
+		if (!propName.startsWith('@') && !propName.startsWith('_')) {
+			const newPropName = (propName === 'Id') ? 'item' + propName : propName;
+			resourceObject[newPropName] = resourceData[propName];
+		}
 	});
+	console.log('RESOURCE OBJECT TO UPDATE', resourceObject);
+	mongoDB.collection('drafts').updateOne(
+		{'user_id': userId, 'itemId': resourceData.Id},
+		{$set: resourceObject},
+		{upsert: true},
+		function (err, res) {
+			if (!!err) {
+				console.log("DRAFT UPDATE ERROR", err);
+			} else {
+				console.log("DRAFT FOUND AND UPDATED");
+			}
+		}
+	);
 }
 
 /**
