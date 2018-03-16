@@ -1,0 +1,25 @@
+﻿AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: An AWS Serverless Specification template describing your function.
+Resources:
+  officepushnotifications:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: index.handler
+      Runtime: nodejs6.10
+      CodeUri: .
+      Description: ''
+      MemorySize: 512
+      Timeout: 20
+      Role: 'arn:aws:iam::931736494797:role/ci_private_lambda'
+      Events:
+        Api1:
+          Type: Api
+          Properties:
+            Path: /
+            Method: POST
+      VpcConfig:
+        SecurityGroupIds:
+          - sg-51006b28
+        SubnetIds:
+          - subnet-fbd9999c
