@@ -1,169 +1,119 @@
-const AWS = require('aws-sdk');
 const Promise = require('bluebird');
-const md5 = require('md5');
+const AWS = require('aws-sdk');
+const SNS = new AWS.SNS();
 
-let env;
-let config = {};
-let redisClient;
-
-exports.handler = handleIt;
+exports.handler = handler;
 
 /**
  * Lambda endpoint handler
  */
-function handleIt(event, context, callback) {
+function handler(event, context, callback) {
 	console.log("EVENT", event);
-	env = event.requestContext.stage;
-	const parameters = event.queryStringParameters ? Object.keys(event.queryStringParameters) : [];
-	const validationTokenParam = 'validationtoken';
-
 	const response = {
 		statusCode: 200,
-		/*headers: {
-			'Content-Type': 'text/plain'
-		},*/
 		isBase64Encoded: false
 	};
 	let responseBody;
+	const validationTokenParam = 'validationtoken';
+	const parameters = event.queryStringParameters ? Object.keys(event.queryStringParameters) : [];
 
 	// handle subscription validation
 	if (parameters.indexOf(validationTokenParam) > -1) {
-		console.log("SUBSCRIPTION VALIDATION ---");
 		responseBody = event.queryStringParameters[validationTokenParam];
 		response.body = responseBody;
 		callback(null, response);
 	}
 	// notifications
 	else {
-		console.log("NOTIFICATION ---");
 		const headers = event.headers;
 		const requestBody = JSON.parse(event.body);
-		console.log("REQUEST-HEADERS", headers);
-		console.log("REQUEST_BODY", requestBody);
 
-		initialize()
-			.then(() => {
-				console.log('Lambda initialized');
+		// TODO is this if/else block needed?
+		if (!requestBody.value || requestBody.value.length === 0) {
+			throw "Resource data missing";
+		}
+		else {
+			if (requestBody.value && requestBody.value.length > 1)
+				console.log("MORE THAN 1 RESOURCE DATA !!!", requestBody.value);
+		}
 
-				if (!requestBody.value || requestBody.value.length === 0) {
-					console.log("RESOURCE DATA MISSING !!!", requestBody.value);
-					throw "Resource data missing";
-				} else {
-					if (requestBody.value && requestBody.value.length > 1)
-						console.log("MORE THAN 1 RESOURCE DATA !!!", requestBody.value);
-				}
+		const userId = headers.ClientState;
+		const resourceData = requestBody.value[0].ResourceData;
+		if (resourceData) { // Resource Data exists
+			if (userId) { // If userId (ClientState) is passed
+				upsertMongo(userId, resourceData);
+			}
+			else {
+				queryRedis(event);
+			}
+		}
+		else { // Like Change Type = Missed
+			// send to office api request lambda
+			queryOfficeApi(userId, event);
+		}
 
-				const userId = headers.ClientState;
-				const resourceData = requestBody.value[0].ResourceData;
-				console.log("REQUEST_RESOURCE_DATA", resourceData);
-				if (resourceData) { // Resource Data exists
-					if (userId) { // If userId (ClientState) is passed
-						console.log('USING CLIENT STATE USER ID', userId);
-						sendToDraft(userId, resourceData);
-					} else {
-						// Get User Id from Redis using Subscription Id
-						const subscriptionId = resourceData.SubscriptionId;
-						const subscriptionIdHash = md5(subscriptionId);
-						console.log('FETCH USER ID FROM EMAIL SUBSCRIPTION', subscriptionIdHash);
-
-						redisClient.hgetallAsync(`email_subscription:${subscriptionIdHash}`)
-							.then(emailSubscription => {
-								console.log('EMAIL-SUBSCRIPTION', emailSubscription);
-								sendToDraft(userId, resourceData);
-							})
-							.catch(err => {
-								throw err;
-							})
-						;
-					}
-				} else // Like Change Type = Missed
-					// send to office api request lambda
-					console.log("!!! RESOURCE DATA MISSING !!!");
-
-				response.body = JSON.stringify(responseBody);
-
-				cleanUp();
-				callback(null, response);
-			})
-			.catch(err => {
-				cleanUp();
-				callback(err);
-			})
-		;
+		response.body = JSON.stringify(responseBody);
+		callback(null, response);
 	}
 }
 
 /**
- * Bootstrap Lambda
- * @return {Promise}
+ * SNS redis lambda notifier
+ * @param {Object} event
  */
-function initialize() {
-	return getConfigParams()
-		.then(() => setRedisClient())
-	;
+function queryRedis(event) {
+	console.log('Lambda transfer: queryRedis');
+	const payload = {
+		event: event
+	}
+	const params = {
+		Message: JSON.stringify(payload),
+		Subject: "Get Redis info",
+		TopicArn: "arn:aws:sns:us-west-1:931736494797:ci-redis-notify"
+	};
+
+	const queryRedis = SNS.publish(params);
+	queryRedis.send();
 }
 
-function sendToDraft(userId, message) {
-	const SNS = new AWS.SNS();
+/**
+ * SNS mongo lambda notifier
+ * @param {string} userId
+ * @param {Object} message
+ */
+function upsertMongo(userId, resourceData) {
+	console.log('Lambda transfer: upsertMongo');
 	const payload = {
 		userId: userId,
-		draft: message,
-		config: config
+		resourceData: resourceData
 	};
-	var params = {
-        Message: JSON.stringify(payload),
-        Subject: "Update mgDraft",
-        TopicArn: "arn:aws:sns:us-west-1:931736494797:ci-draft-notify"
-    };
+	const params = {
+		Message: JSON.stringify(payload),
+		Subject: "Update mgDraft",
+		TopicArn: "arn:aws:sns:us-west-1:931736494797:ci-draft-notify"
+	};
 
-    const draftUpdate = SNS.publish(params);
-    draftUpdate.send();
+	const upsertMongo = SNS.publish(params);
+	upsertMongo.send();
 }
 
 /**
- * Clean up
+ * SNS office rest api lambda notifier
+ * @param {string} userId
+ * @param {Object} message
  */
-function cleanUp() {
-	if (redisClient) redisClient.quit();
-}
+function queryOfficeApi(userId, event) {
+	console.log('Lambda transfer: queryOfficeApi');
+	const payload = {
+		userId: userId,
+		event: event
+	};
+	const params = {
+		Message: JSON.stringify(payload),
+		Subject: "Find missing push notification",
+		TopicArn: "arn:aws:sns:us-west-1:931736494797:ci-office-rest"
+	};
 
-/**
- * Set redis client
- * @return {Promise}
- */
-function setRedisClient() {
-	if (redisClient)
-		return Promise.resolve(redisClient);
-
-	return new Promise((resolve, reject) => {
-		const redis = require('redis');
-		Promise.promisifyAll(redis.RedisClient.prototype);
-		redisClient = redis.createClient({host: config.redis.host, port: parseInt(config.redis.port), password: config.redis.pass});
-
-		redisClient.on('connect', () => {
-			console.log('Redis client connected');
-			resolve(redisClient);
-		})
-		.on('error', (err) => {
-			console.log('Redis client error', err);
-			reject(err);
-		});
-	});
-}
-
-/**
- * Get parameters from AWS Systems Manager Parameter Store
- * @return {Promise}
- */
-function getConfigParams() {
-	if (Object.keys(config).length > 0)
-		return Promise.resolve(config);
-
-	const S3 = Promise.promisifyAll(new AWS.S3({region: 'us-east-1'}));
-	return S3.getObjectAsync({Bucket: 'ci-office-notification', Key: `${env}.json`})
-		.then(s3Obj => {
-			config = JSON.parse(s3Obj.Body.toString());
-			return config;
-		})
-	;
+	const queryOfficeApi = SNS.publish(params);
+	queryOfficeApi.send();
 }
