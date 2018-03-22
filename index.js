@@ -48,8 +48,8 @@ function handler(event, context, callback) {
 			}
 		}
 		else { // Like Change Type = Missed
-			// send to office api request lambda
-			queryOfficeApi(userId, event);
+			// log for further review
+			console.log('NO RESOURCE DATA', event);
 		}
 
 		response.body = JSON.stringify(responseBody);
