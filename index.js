@@ -2,12 +2,12 @@ const Promise = require('bluebird');
 const AWS = require('aws-sdk');
 const SNS = new AWS.SNS();
 
-exports.handler = handler;
+exports.handler = handleIt;
 
 /**
  * Lambda endpoint handler
  */
-function handler(event, context, callback) {
+function handleIt(event, context, callback) {
 	console.log("EVENT", event);
 	const response = {
 		statusCode: 200,
@@ -19,14 +19,18 @@ function handler(event, context, callback) {
 
 	// handle subscription validation
 	if (parameters.indexOf(validationTokenParam) > -1) {
+		console.log("--- VALIDATION");
 		responseBody = event.queryStringParameters[validationTokenParam];
 		response.body = responseBody;
 		callback(null, response);
 	}
 	// notifications
 	else {
+		console.log("--- NOTIFICATION");
 		const headers = event.headers;
+		console.log("--- HEADERS", headers);
 		const requestBody = JSON.parse(event.body);
+		console.log("--- RQ BODY", requestBody);
 
 		// TODO is this if/else block needed?
 		if (!requestBody.value || requestBody.value.length === 0) {
@@ -40,16 +44,26 @@ function handler(event, context, callback) {
 		const userId = headers.ClientState;
 		const resourceData = requestBody.value[0].ResourceData;
 		if (resourceData) { // Resource Data exists
-			if (userId) { // If userId (ClientState) is passed
-				upsertMongo(userId, resourceData);
+			if (resourceData.InternetMessageId) { // Resource Data has all the properties
+				console.log("--- RQ RESOURCE DATA (FULL)", resourceData);
+				if (userId) { // If userId (ClientState) is passed
+					console.log("--- HAS UserId", userId);
+					upsertMongo(userId, resourceData);
+				}
+				else {
+					console.log("--- NO UserId");
+					queryRedis(event);
+				}
 			}
-			else {
-				queryRedis(event);
+			else { // Resource Data only contains Id property
+				console.log("--- RQ RESOURCE DATA (PARTIAL)", resourceData);
+				// TODO Just logging because not sure what to do here. Saw these for delete change types.
 			}
 		}
 		else { // Like Change Type = Missed
-			// log for further review
-			console.log('NO RESOURCE DATA', event);
+			console.log("--- NO RESOURCE DATA");
+			// send to office api request lambda
+			queryOfficeApi(userId, event);
 		}
 
 		response.body = JSON.stringify(responseBody);
@@ -72,8 +86,14 @@ function queryRedis(event) {
 		TopicArn: "arn:aws:sns:us-west-1:931736494797:ci-redis-notify"
 	};
 
-	const queryRedis = SNS.publish(params);
-	queryRedis.send();
+	console.log('--- QUERY REDIS PUBLISH PARAMS', params);
+	const queryRedis = SNS.publish(params, (err, data) => {
+		if (err) {
+			console.log("Query Redis SNS Error: ", err);
+		}
+		console.log("Query Redis SNS Success: ", data);
+	});
+	//queryRedis.send();
 }
 
 /**
@@ -93,8 +113,14 @@ function upsertMongo(userId, resourceData) {
 		TopicArn: "arn:aws:sns:us-west-1:931736494797:ci-draft-notify"
 	};
 
-	const upsertMongo = SNS.publish(params);
-	upsertMongo.send();
+	console.log('--- UPSERT MG PUBLISH PARAMS', params);
+	const upsertMongo = SNS.publish(params, (err, data) => {
+		if (err) {
+			console.log("Upsert Mongo SNS Error: ", err);
+		}
+		console.log("Upsert Mongo SNS Success: ", data);
+	});
+	//upsertMongo.send();
 }
 
 /**
@@ -114,6 +140,12 @@ function queryOfficeApi(userId, event) {
 		TopicArn: "arn:aws:sns:us-west-1:931736494797:ci-office-rest"
 	};
 
-	const queryOfficeApi = SNS.publish(params);
-	queryOfficeApi.send();
+	console.log('--- QUERY OFFICE API PUBLISH PARAMS', params);
+	const queryOfficeApi = SNS.publish(params, (err, data) => {
+		if (err) {
+			console.log("Office API SNS Error: ", err);
+		}
+		console.log("Office API SNS Success: ", data);
+	});
+	//queryOfficeApi.send();
 }
